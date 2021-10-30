@@ -360,7 +360,11 @@ def line(
 
         host.create_fact(
             FindInFile,
-            kwargs={'path': path, 'pattern': match_line},
+            kwargs={
+                'path': path,
+                'pattern': match_line,
+                'interpolate_variables': interpolate_variables,
+            },
             data=[replace or line],
         )
 
@@ -375,7 +379,11 @@ def line(
 
         host.delete_fact(
             FindInFile,
-            kwargs={'path': path, 'pattern': match_line},
+            kwargs={
+                'path': path,
+                'pattern': match_line,
+                'interpolate_variables': interpolate_variables,
+            },
         )
 
     # Line(s) exists and we have want to ensure they're correct
@@ -441,7 +449,11 @@ def replace(
         )
         host.create_fact(
             FindInFile,
-            kwargs={'path': path, 'pattern': match},
+            kwargs={
+                'path': path,
+                'pattern': match,
+                'interpolate_variables': interpolate_variables,
+            },
             data=[],
         )
     else:
