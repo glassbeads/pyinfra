@@ -13,8 +13,8 @@ from pyinfra.api.exceptions import InventoryError
 from pyinfra.api.util import get_file_io
 
 from .util import (
-    get_sudo_password,
-    make_unix_command,
+    execute_command_with_sudo_retry,
+    make_unix_command_for_host,
     run_local_process,
     split_combined_output,
 )
@@ -42,7 +42,6 @@ def run_shell_command(
     print_output=False,
     print_input=False,
     return_combined_output=False,
-    use_sudo_password=False,
     **command_kwargs
 ):
     '''
@@ -62,27 +61,25 @@ def run_shell_command(
         stdout and stderr are both lists of strings from each buffer.
     '''
 
-    if use_sudo_password:
-        command_kwargs['use_sudo_password'] = get_sudo_password(
-            state, host, use_sudo_password,
-            run_shell_command=run_shell_command,
-            put_file=put_file,
+    def execute_command():
+        unix_command = make_unix_command_for_host(state, host, command, **command_kwargs)
+        actual_command = unix_command.get_raw_value()
+
+        logger.debug('--> Running command on localhost: {0}'.format(unix_command))
+
+        if print_input:
+            click.echo('{0}>>> {1}'.format(host.print_prefix, unix_command), err=True)
+
+        return run_local_process(
+            actual_command,
+            stdin=stdin,
+            timeout=timeout,
+            print_output=print_output,
+            print_prefix=host.print_prefix,
         )
 
-    command = make_unix_command(command, state=state, **command_kwargs)
-    actual_command = command.get_raw_value()
-
-    logger.debug('--> Running command on localhost: {0}'.format(command))
-
-    if print_input:
-        click.echo('{0}>>> {1}'.format(host.print_prefix, command), err=True)
-
-    return_code, combined_output = run_local_process(
-        actual_command,
-        stdin=stdin,
-        timeout=timeout,
-        print_output=print_output,
-        print_prefix=host.print_prefix,
+    return_code, combined_output = execute_command_with_sudo_retry(
+        host, command_kwargs, execute_command,
     )
 
     if success_exit_codes:

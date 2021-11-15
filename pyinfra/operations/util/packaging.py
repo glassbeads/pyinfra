@@ -138,13 +138,14 @@ def ensure_packages(
         )
 
         for package in diff_packages:  # add/remove from current packages
+            version = 'unknown'
+            if version_join:
+                bits = package.rsplit(version_join, 1)
+                package = bits[0]
+                if len(bits) == 2:
+                    version = bits[1]
+
             if present:
-                version = 'unknown'
-                if version_join:
-                    bits = package.rsplit(version_join, 1)
-                    package = bits[0]
-                    if len(bits) == 2:
-                        version = bits[1]
                 current_packages[package] = [version]
             else:
                 current_packages.pop(package, None)
@@ -185,6 +186,7 @@ def ensure_rpm(state, host, files, source, present, package_manager_command):
         # If we had info, always install
         if info:
             yield 'rpm -i {0}'.format(source)
+            host.create_fact(RpmPackage, kwargs={'name': info['name']}, data=info)
 
         # This happens if we download the package mid-deploy, so we have no info
         # but also don't know if it's installed. So check at runtime, otherwise
@@ -195,6 +197,7 @@ def ensure_rpm(state, host, files, source, present, package_manager_command):
     # Package exists but we don't want?
     elif exists and not present:
         yield '{0} remove -y {1}'.format(package_manager_command, info['name'])
+        host.delete_fact(RpmPackage, kwargs={'name': info['name']})
 
     else:
         host.noop('rpm {0} is {1}'.format(

@@ -32,8 +32,8 @@ from pyinfra.api.util import get_file_io, memoize
 
 from .sshuserclient import SSHClient
 from .util import (
-    get_sudo_password,
-    make_unix_command,
+    execute_command_with_sudo_retry,
+    make_unix_command_for_host,
     read_buffers_into_queue,
     run_local_process,
     split_combined_output,
@@ -162,6 +162,8 @@ def _make_paramiko_kwargs(state, host):
         'allow_agent': False,
         'look_for_keys': False,
         'hostname': host.data.ssh_hostname or host.name,
+        # Special pyinfra specific kwarg for our custom SSHClient
+        '_pyinfra_force_forward_agent': host.data.ssh_forward_agent,
     }
 
     for key, value in (
@@ -258,7 +260,6 @@ def run_shell_command(
     print_output=False,
     print_input=False,
     return_combined_output=False,
-    use_sudo_password=False,
     **command_kwargs
 ):
     '''
@@ -279,48 +280,48 @@ def run_shell_command(
         stdout and stderr are both lists of strings from each buffer.
     '''
 
-    if use_sudo_password:
-        command_kwargs['use_sudo_password'] = get_sudo_password(
-            state, host, use_sudo_password,
-            run_shell_command=run_shell_command,
-            put_file=put_file,
+    def execute_command():
+        unix_command = make_unix_command_for_host(state, host, command, **command_kwargs)
+        actual_command = unix_command.get_raw_value()
+
+        logger.debug('Running command on {0}: (pty={1}) {2}'.format(
+            host.name, get_pty, unix_command,
+        ))
+
+        if print_input:
+            click.echo('{0}>>> {1}'.format(host.print_prefix, unix_command), err=True)
+
+        # Run it! Get stdout, stderr & the underlying channel
+        stdin_buffer, stdout_buffer, stderr_buffer = host.connection.exec_command(
+            actual_command,
+            get_pty=get_pty,
         )
 
-    command = make_unix_command(command, state=state, **command_kwargs)
-    actual_command = command.get_raw_value()
+        if stdin:
+            write_stdin(stdin, stdin_buffer)
 
-    logger.debug('Running command on {0}: (pty={1}) {2}'.format(
-        host.name, get_pty, command,
-    ))
+        combined_output = read_buffers_into_queue(
+            stdout_buffer,
+            stderr_buffer,
+            timeout=timeout,
+            print_output=print_output,
+            print_prefix=host.print_prefix,
+        )
 
-    if print_input:
-        click.echo('{0}>>> {1}'.format(host.print_prefix, command), err=True)
+        logger.debug('Waiting for exit status...')
+        exit_status = stdout_buffer.channel.recv_exit_status()
+        logger.debug('Command exit status: {0}'.format(exit_status))
 
-    # Run it! Get stdout, stderr & the underlying channel
-    stdin_buffer, stdout_buffer, stderr_buffer = host.connection.exec_command(
-        actual_command,
-        get_pty=get_pty,
+        return exit_status, combined_output
+
+    return_code, combined_output = execute_command_with_sudo_retry(
+        host, command_kwargs, execute_command,
     )
-
-    if stdin:
-        write_stdin(stdin, stdin_buffer)
-
-    combined_output = read_buffers_into_queue(
-        stdout_buffer,
-        stderr_buffer,
-        timeout=timeout,
-        print_output=print_output,
-        print_prefix=host.print_prefix,
-    )
-
-    logger.debug('Waiting for exit status...')
-    exit_status = stdout_buffer.channel.recv_exit_status()
-    logger.debug('Command exit status: {0}'.format(exit_status))
 
     if success_exit_codes:
-        status = exit_status in success_exit_codes
+        status = return_code in success_exit_codes
     else:
-        status = exit_status == 0
+        status = return_code == 0
 
     if return_combined_output:
         return status, combined_output
@@ -433,16 +434,26 @@ def put_file(
         temp_file = state.get_temp_filename(remote_filename)
         _put_file(host, filename_or_io, temp_file)
 
-        # Execute run_shell_command w/sudo and/or su_user
-        command = StringCommand('mv', temp_file, QuoteString(remote_filename))
-
-        # Move it to the su_user if present
+        # Make sure our sudo/su user can access the file
         if su_user:
-            command = StringCommand(command, '&&', 'chown', su_user, QuoteString(remote_filename))
-
-        # Otherwise any sudo_user
+            command = StringCommand('setfacl', '-m', 'u:{0}:r'.format(su_user), temp_file)
         elif sudo_user:
-            command = StringCommand(command, '&&', 'chown', sudo_user, QuoteString(remote_filename))
+            command = StringCommand('setfacl -m u:{0}:r'.format(sudo_user), temp_file)
+        if su_user or sudo_user:
+            status, _, stderr = run_shell_command(
+                state, host, command,
+                sudo=False,
+                print_output=print_output,
+                print_input=print_input,
+                **command_kwargs
+            )
+
+            if status is False:
+                logger.error('Error on handover to sudo/su user: {0}'.format('\n'.join(stderr)))
+                return False
+
+        # Execute run_shell_command w/sudo and/or su_user
+        command = StringCommand('cp', temp_file, QuoteString(remote_filename))
 
         status, _, stderr = run_shell_command(
             state, host, command,
@@ -454,6 +465,21 @@ def put_file(
 
         if status is False:
             logger.error('File upload error: {0}'.format('\n'.join(stderr)))
+            return False
+
+        # Delete the temporary file now that we've successfully copied it
+        command = StringCommand('rm', '-f', temp_file)
+
+        status, _, stderr = run_shell_command(
+            state, host, command,
+            sudo=False,
+            print_output=print_output,
+            print_input=print_input,
+            **command_kwargs
+        )
+
+        if status is False:
+            logger.error('Unable to remove temporary file: {0}'.format('\n'.join(stderr)))
             return False
 
     # No sudo and no su_user, so just upload it!

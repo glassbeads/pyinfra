@@ -5,7 +5,9 @@
         "charset": "UTF-8"
     },
     "facts": {
-        "mysql_databases": []
+        "mysql.MysqlDatabases": {
+            "mysql_host=None, mysql_password=None, mysql_port=None, mysql_user=None": {}
+        }
     },
     "commands": [
         "mysql -Be 'CREATE DATABASE somedb COLLATE utf8_bin CHARSET UTF-8'"

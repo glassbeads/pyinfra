@@ -1,8 +1,10 @@
 {
     "args": ["somedb"],
     "facts": {
-        "mysql_databases": {
-            "somedb": {}
+        "mysql.MysqlDatabases": {
+            "mysql_host=None, mysql_password=None, mysql_port=None, mysql_user=None": {
+                "somedb": {}
+            }
         }
     },
     "commands": [],

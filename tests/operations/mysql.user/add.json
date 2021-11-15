@@ -4,10 +4,11 @@
         "user_hostname": "localwhat"
     },
     "facts": {
-        "mysql_users": {}
+        "mysql.MysqlUsers": {
+            "mysql_host=None, mysql_password=None, mysql_port=None, mysql_user=None": {}
+        }
     },
     "commands": [
         "mysql -Be 'CREATE USER \"someuser\"@\"localwhat\"'"
-    ],
-    "idempotent": false
+    ]
 }

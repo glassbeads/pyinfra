@@ -36,6 +36,7 @@ from . import (
     bsdinit,
     dnf,
     files,
+    openrc,
     pacman,
     pkg,
     systemd,
@@ -48,7 +49,7 @@ from . import (
 from .util.files import chmod, sed_replace
 
 
-@operation
+@operation(is_idempotent=False)
 def reboot(delay=10, interval=1, reboot_timeout=300, state=None, host=None):
     '''
     Reboot the server and wait for reconnection.
@@ -101,7 +102,7 @@ def reboot(delay=10, interval=1, reboot_timeout=300, state=None, host=None):
     yield FunctionCommand(wait_and_reconnect, (), {})
 
 
-@operation
+@operation(is_idempotent=False)
 def wait(port=None, state=None, host=None):
     '''
     Waits for a port to come active on the target machine. Requires netstat, checks every
@@ -127,7 +128,7 @@ def wait(port=None, state=None, host=None):
     '''.format(port)
 
 
-@operation
+@operation(is_idempotent=False)
 def shell(commands, state=None, host=None):
     '''
     Run raw shell code on server during a deploy. If the command would
@@ -154,7 +155,7 @@ def shell(commands, state=None, host=None):
         yield command
 
 
-@operation
+@operation(is_idempotent=False)
 def script(src, state=None, host=None):
     '''
     Upload and execute a local script on the remote host.
@@ -179,7 +180,7 @@ def script(src, state=None, host=None):
     yield temp_file
 
 
-@operation
+@operation(is_idempotent=False)
 def script_template(src, state=None, host=None, **data):
     '''
     Generate, upload and execute a local script template on the remote host.
@@ -248,10 +249,14 @@ def modprobe(module, present=True, force=False, state=None, host=None):
     # Module is loaded and we don't want it?
     if not present and present_mods:
         yield 'modprobe{0} -r -a {1}'.format(args, ' '.join(present_mods))
+        for mod in present_mods:
+            modules.pop(mod)
 
     # Module isn't loaded and we want it?
     elif present and missing_mods:
         yield 'modprobe{0} -a {1}'.format(args, ' '.join(missing_mods))
+        for mod in missing_mods:
+            modules[mod] = {}
 
     else:
         host.noop('{0} {1} {2} {3}'.format(
@@ -298,10 +303,12 @@ def mount(
             ' -o {0}'.format(options_string) if options_string else '',
             path,
         )
+        mounts[path] = {'options': options}
 
     # Want no mount but mounted?
     elif mounted is False and is_mounted:
         yield 'umount {0}'.format(path)
+        mounts.pop(path)
 
     # Want mount and is mounted! Check the options
     elif is_mounted and mounted and options:
@@ -309,6 +316,7 @@ def mount(
         needed_options = set(options) - set(mounted_options)
         if needed_options:
             yield 'mount -o remount,{0} {1}'.format(options_string, path)
+            mounts[path]['options'] = options
 
     else:
         host.noop('filesystem {0} is {1}'.format(
@@ -466,6 +474,9 @@ def service(
 
     if host.get_fact(Which, command='systemctl'):
         service_operation = systemd.service
+
+    elif host.get_fact(Which, command='rc-service'):
+        service_operation = openrc.service
 
     elif host.get_fact(Which, command='initctl'):
         service_operation = upstart.service
@@ -770,7 +781,7 @@ def group(group, present=True, system=False, gid=None, state=None, host=None):
 
         # Groups are often added by other operations (package installs), so check
         # for the group at runtime before adding.
-        yield "grep '{0}:' /etc/group || groupadd {1}".format(
+        yield "grep '^{0}:' /etc/group || groupadd {1}".format(
             group,
             ' '.join(args),
         )
@@ -883,7 +894,7 @@ def user(
 
         # Users are often added by other operations (package installs), so check
         # for the user at runtime before adding.
-        yield "grep '{1}:' /etc/passwd || useradd {0} {1}".format(
+        yield "grep '^{1}:' /etc/passwd || useradd {0} {1}".format(
             ' '.join(args),
             user,
         )

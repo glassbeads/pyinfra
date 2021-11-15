@@ -12,7 +12,7 @@ from gevent.queue import Queue
 from six.moves import shlex_quote
 
 from pyinfra import logger
-from pyinfra.api import Config, MaskString, QuoteString, StringCommand
+from pyinfra.api import MaskString, QuoteString, StringCommand
 from pyinfra.api.util import memoize
 
 SUDO_ASKPASS_ENV_VAR = 'PYINFRA_SUDO_PASSWORD'
@@ -49,6 +49,18 @@ def read_buffer(type_, io, output_queue, print_output=False, print_func=None):
 
         if print_output:
             _print(line)
+
+
+def execute_command_with_sudo_retry(host, command_kwargs, execute_command):
+    return_code, combined_output = execute_command()
+
+    if return_code != 0 and combined_output:
+        last_line = combined_output[-1][1]
+        if last_line == 'sudo: a password is required':
+            command_kwargs['use_sudo_password'] = True  # ask for the password
+            return_code, combined_output = execute_command()
+
+    return return_code, combined_output
 
 
 def run_local_process(
@@ -151,11 +163,11 @@ def write_stdin(stdin, buffer):
     buffer.close()
 
 
-def get_sudo_password(state, host, use_sudo_password, run_shell_command, put_file):
+def _get_sudo_password(host, use_sudo_password):
     sudo_askpass_uploaded = host.connector_data.get('sudo_askpass_uploaded', False)
     if not sudo_askpass_uploaded:
-        put_file(state, host, get_sudo_askpass_exe(), SUDO_ASKPASS_EXE_FILENAME)
-        run_shell_command(state, host, 'chmod +x {0}'.format(SUDO_ASKPASS_EXE_FILENAME))
+        host.put_file(get_sudo_askpass_exe(), SUDO_ASKPASS_EXE_FILENAME)
+        host.run_shell_command('chmod +x {0}'.format(SUDO_ASKPASS_EXE_FILENAME))
         host.connector_data['sudo_askpass_uploaded'] = True
 
     if use_sudo_password is True:
@@ -164,10 +176,12 @@ def get_sudo_password(state, host, use_sudo_password, run_shell_command, put_fil
             sudo_password = getpass('{0}sudo password: '.format(host.print_prefix))
             host.connector_data['sudo_password'] = sudo_password
         sudo_password = sudo_password
+    elif callable(use_sudo_password):
+        sudo_password = use_sudo_password()
     else:
         sudo_password = use_sudo_password
 
-    return (SUDO_ASKPASS_EXE_FILENAME, shlex_quote(sudo_password))
+    return shlex_quote(sudo_password)
 
 
 def remove_any_sudo_askpass_file(host):
@@ -195,24 +209,52 @@ def _warn_invalid_auth_args(args, requires_key, invalid_keys):
             ).format(key, requires_key))
 
 
+def make_unix_command_for_host(state, host, *command_args, **command_kwargs):
+    if not command_kwargs.get('doas') and not state.config.DOAS:
+        _warn_invalid_auth_args(command_kwargs, 'doas', ('doas_user',))
+
+    # If both sudo arg and config sudo are false, warn if any of the other sudo
+    # arguments are present as they will be ignored.
+    if not command_kwargs.get('sudo') and not state.config.SUDO:
+        _warn_invalid_auth_args(
+            command_kwargs,
+            'sudo',
+            ('use_sudo_password', 'use_sudo_login', 'preserve_sudo_env', 'sudo_user'),
+        )
+
+    if not command_kwargs.get('su_user') and not state.config.SU_USER:
+        _warn_invalid_auth_args(
+            command_kwargs,
+            'su_user',
+            ('use_su_login', 'preserve_su_env', 'su_shell'),
+        )
+
+    use_sudo_password = command_kwargs.pop('use_sudo_password', None)
+    if use_sudo_password:
+        command_kwargs['sudo_password'] = _get_sudo_password(host, use_sudo_password)
+
+    return make_unix_command(*command_args, **command_kwargs)
+
+
 def make_unix_command(
     command,
     env=None,
     chdir=None,
-    shell_executable=Config.SHELL,
+    shell_executable=None,
     # Su config
-    su_user=Config.SU_USER,
-    use_su_login=Config.USE_SU_LOGIN,
-    su_shell=Config.SU_SHELL,
-    preserve_su_env=Config.PRESERVE_SU_ENV,
+    su_user=None,
+    use_su_login=False,
+    su_shell=None,
+    preserve_su_env=False,
     # Sudo config
-    sudo=Config.SUDO,
-    sudo_user=Config.SUDO_USER,
-    use_sudo_login=Config.USE_SUDO_LOGIN,
-    use_sudo_password=Config.USE_SUDO_PASSWORD,
-    preserve_sudo_env=Config.PRESERVE_SUDO_ENV,
-    # Optional state object, used to decide if we print invalid auth arg warnings
-    state=None,
+    sudo=False,
+    sudo_user=None,
+    use_sudo_login=False,
+    sudo_password=False,
+    preserve_sudo_env=False,
+    # Doas config
+    doas=False,
+    doas_user=None,
 ):
     '''
     Builds a shell command with various kwargs.
@@ -239,18 +281,23 @@ def make_unix_command(
 
     command_bits = []
 
-    if use_sudo_password:
-        askpass_filename, sudo_password = use_sudo_password
+    if doas:
+        command_bits.extend(['doas', '-n'])
+
+        if doas_user:
+            command_bits.extend(['-u', doas_user])
+
+    if sudo_password:
         command_bits.extend([
             'env',
-            'SUDO_ASKPASS={0}'.format(askpass_filename),
+            'SUDO_ASKPASS={0}'.format(SUDO_ASKPASS_EXE_FILENAME),
             MaskString('{0}={1}'.format(SUDO_ASKPASS_ENV_VAR, sudo_password)),
         ])
 
     if sudo:
         command_bits.extend(['sudo', '-H'])
 
-        if use_sudo_password:
+        if sudo_password:
             command_bits.extend(['-A', '-k'])  # use askpass, disable cache
         else:
             command_bits.append('-n')  # disable prompt/interactivity
@@ -263,15 +310,6 @@ def make_unix_command(
 
         if sudo_user:
             command_bits.extend(('-u', sudo_user))
-
-    # If both sudo arg and config sudo are false, warn if any of the other sudo
-    # arguments are present as they will be ignored.
-    elif state is None or not state.config.SUDO:
-        _warn_invalid_auth_args(
-            locals(),
-            'sudo',
-            ('use_sudo_password', 'use_sudo_login', 'preserve_sudo_env', 'sudo_user'),
-        )
 
     if su_user:
         command_bits.append('su')
@@ -293,15 +331,6 @@ def make_unix_command(
     else:
         # Otherwise simply use thee shell directly
         command_bits.extend([shell_executable, '-c', command])
-
-        # If both su_user arg and config su_user are false, warn if any of the other su
-        # arguments are present as they will be ignored.
-        if state is None or not state.config.SU_USER:
-            _warn_invalid_auth_args(
-                locals(),
-                'su_user',
-                ('use_su_login', 'preserve_su_env', 'su_shell'),
-            )
 
     return StringCommand(*command_bits)
 

@@ -112,6 +112,8 @@ def make_operation_tests(arg):
             ):
                 return
 
+            op_test_name = '{0}/{1}.json'.format(arg, test_name)
+
             # Create a host with this tests facts and attach to pseudo host
             host = create_host(facts=test_data.get('facts', {}))
 
@@ -158,11 +160,16 @@ def make_operation_tests(arg):
                                     'Operation not idempotent, second output commands: {0}'
                                 ).format(second_output_commands))
                         else:
-                            if not test_data.get('disable_itempotent_warning_reason'):
+                            if not second_output_commands:
+                                raise Exception((
+                                    'Operation tests as idempotent but test '
+                                    'says it is not: {0}'
+                                ).format(op_test_name))
+                            if not test_data.get('disable_idempotent_warning_reason'):
                                 warnings.warn((
                                     'This operation should be idempotent, but the test has disabled'
                                     ' this check without reason: {0}'
-                                ).format(test_name))
+                                ).format(op_test_name))
 
             commands = parse_commands(output_commands)
             assert_commands(commands, test_data['commands'])
@@ -180,7 +187,7 @@ def make_operation_tests(arg):
                 else:
                     assert host.noop_description is not None, 'no noop description was set'
                     warnings.warn('No noop_description set for test: {0} (got "{1}")'.format(
-                        test_name, host.noop_description,
+                        op_test_name, host.noop_description,
                     ))
 
     return TestTests

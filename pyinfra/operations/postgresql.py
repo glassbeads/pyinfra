@@ -14,10 +14,15 @@ See example/postgresql.py for detailed example
 '''
 
 from pyinfra.api import MaskString, operation, StringCommand
-from pyinfra.facts.postgresql import make_execute_psql_command, make_psql_command
+from pyinfra.facts.postgresql import (
+    make_execute_psql_command,
+    make_psql_command,
+    PostgresqlDatabases,
+    PostgresqlRoles,
+)
 
 
-@operation
+@operation(is_idempotent=False)
 def sql(
     sql,
     database=None,
@@ -90,9 +95,12 @@ def role(
 
     '''
 
-    roles = host.fact.postgresql_roles(
-        postgresql_user, postgresql_password,
-        postgresql_host, postgresql_port,
+    roles = host.get_fact(
+        PostgresqlRoles,
+        postgresql_user=postgresql_user,
+        postgresql_password=postgresql_password,
+        postgresql_host=postgresql_host,
+        postgresql_port=postgresql_port,
     )
 
     is_present = role in roles
@@ -188,9 +196,12 @@ def database(
 
     '''
 
-    current_databases = host.fact.postgresql_databases(
-        postgresql_user, postgresql_password,
-        postgresql_host, postgresql_port,
+    current_databases = host.get_fact(
+        PostgresqlDatabases,
+        postgresql_user=postgresql_user,
+        postgresql_password=postgresql_password,
+        postgresql_host=postgresql_host,
+        postgresql_port=postgresql_port,
     )
 
     is_present = database in current_databases
@@ -235,7 +246,7 @@ def database(
         host.noop('postgresql database {0} exists'.format(database))
 
 
-@operation
+@operation(is_idempotent=False)
 def dump(
     dest, database=None,
     # Details for speaking to PostgreSQL via `psql` CLI
@@ -273,7 +284,7 @@ def dump(
     ), '>', dest)
 
 
-@operation
+@operation(is_idempotent=False)
 def load(
     src, database=None,
     # Details for speaking to PostgreSQL via `psql` CLI

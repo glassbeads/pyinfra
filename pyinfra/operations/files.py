@@ -5,17 +5,17 @@ The files module handles filesystem state, file uploads and template generation.
 from __future__ import unicode_literals
 
 import posixpath
+import re
 import sys
 import traceback
-
 from datetime import timedelta
 from fnmatch import fnmatch
 from os import makedirs, path as os_path, walk
 
 import six
-
 from jinja2 import TemplateRuntimeError, TemplateSyntaxError, UndefinedError
 
+import pyinfra
 from pyinfra import logger
 from pyinfra.api import (
     FileDownloadCommand,
@@ -68,7 +68,7 @@ def download(
     state=None, host=None,
 ):
     '''
-    Download files from remote locations using curl or wget.
+    Download files from remote locations using ``curl`` or ``wget``.
 
     + src: source URL of the file
     + dest: where to save the file
@@ -93,6 +93,8 @@ def download(
     '''
 
     info = host.get_fact(File, path=dest)
+    host_datetime = host.get_fact(Date).replace(tzinfo=None)
+
     # Destination is a directory?
     if info is False:
         raise OperationError(
@@ -172,6 +174,24 @@ def download(
                 '|| ( echo {2} && exit 1 )'
             ), QuoteString(dest), md5sum, QuoteString('MD5 did not match!'))
 
+        host.create_fact(
+            File,
+            kwargs={'path': dest},
+            data={'mode': mode, 'group': group, 'user': user, 'mtime': host_datetime},
+        )
+
+        # Remove any checksum facts as we don't know the correct values
+        for value, fact_cls in (
+            (sha1sum, Sha1File),
+            (sha256sum, Sha256File),
+            (md5sum, Md5File),
+        ):
+            fact_kwargs = {'path': dest}
+            if value:
+                host.create_fact(fact_cls, kwargs=fact_kwargs, data=value)
+            else:
+                host.delete_fact(fact_cls, kwargs=fact_kwargs)
+
     else:
         host.noop('file {0} has already been downloaded'.format(dest))
 
@@ -181,6 +201,7 @@ def line(
     path, line,
     present=True, replace=None, flags=None, backup=False,
     interpolate_variables=False,
+    escape_regex_characters=False,
     state=None, host=None,
     assume_present=False,
 ):
@@ -195,6 +216,7 @@ def line(
     + backup: whether to backup the file (see below)
     + interpolate_variables: whether to interpolate variables in ``replace``
     + assume_present: whether to assume a matching line already exists in the file
+    + escape_regex_characters: whether to escape regex characters from the matching line
 
     Regex line matching:
         Unless line matches a line (starts with ^, ends $), pyinfra will wrap it such that
@@ -261,7 +283,12 @@ def line(
         )
     '''
 
-    match_line = ensure_whole_line_match(line)
+    match_line = line
+
+    if escape_regex_characters:
+        match_line = re.sub(r'([\.\\\+\*\?\[\^\]\$\(\)\{\}\-])', r'\\\1', match_line)
+
+    match_line = ensure_whole_line_match(match_line)
 
     # Is there a matching line in this file?
     if assume_present:
@@ -339,6 +366,16 @@ def line(
             else:
                 host.noop('line "{0}" exists in {1}'.format(replace or line, path))
 
+        host.create_fact(
+            FindInFile,
+            kwargs={
+                'path': path,
+                'pattern': match_line,
+                'interpolate_variables': interpolate_variables,
+            },
+            data=[replace or line],
+        )
+
     # Line(s) exists and we want to remove them, replace with nothing
     elif present_lines and not present:
         yield sed_replace(
@@ -348,11 +385,22 @@ def line(
             interpolate_variables=interpolate_variables,
         )
 
+        host.delete_fact(
+            FindInFile,
+            kwargs={
+                'path': path,
+                'pattern': match_line,
+                'interpolate_variables': interpolate_variables,
+            },
+        )
+
     # Line(s) exists and we have want to ensure they're correct
     elif present_lines and present:
         # If any of lines are different, sed replace them
         if replace and any(line != replace for line in present_lines):
             yield sed_replace_command
+            del present_lines[:]  # TODO: use .clear() when py3+
+            present_lines.append(replace)
         else:
             host.noop('line "{0}" exists in {1}'.format(replace or line, path))
 
@@ -406,6 +454,15 @@ def replace(
             flags=flags,
             backup=backup,
             interpolate_variables=interpolate_variables,
+        )
+        host.create_fact(
+            FindInFile,
+            kwargs={
+                'path': path,
+                'pattern': match,
+                'interpolate_variables': interpolate_variables,
+            },
+            data=[],
         )
     else:
         host.noop('string "{0}" does not exist in {1}'.format(match, path))
@@ -595,10 +652,15 @@ def _create_remote_dir(state, host, remote_filename, user, group):
         )
 
 
-@operation(pipeline_facts={
-    'file': 'src',
-    'sha1_file': 'src',
-})
+@operation(
+    # We don't (currently) cache the local state, so there's nothing we can
+    # update to flag the local file as present.
+    is_idempotent=False,
+    pipeline_facts={
+        'file': 'src',
+        'sha1_file': 'src',
+    },
+)
 def get(
     src, dest,
     add_deploy_dir=True, create_local_dir=False, force=False,
@@ -729,6 +791,8 @@ def put(
     if create_remote_dir:
         yield _create_remote_dir(state, host, dest, user, group)
 
+    local_sum = get_file_sha1(src)
+
     # No remote file, always upload and user/group/mode if supplied
     if not remote_file or force:
         yield FileUploadCommand(local_file, dest)
@@ -741,7 +805,6 @@ def put(
 
     # File exists, check sum and check user/group/mode if supplied
     else:
-        local_sum = get_file_sha1(src)
         remote_sum = host.get_fact(Sha1File, path=dest)
 
         # Check sha1sum, upload if needed
@@ -772,6 +835,14 @@ def put(
 
             if not changed:
                 host.noop('file {0} is already uploaded'.format(dest))
+
+    # Now we've uploaded the file and ensured user/group/mode, update the relevant fact data
+    host.create_fact(Sha1File, kwargs={'path': dest}, data=local_sum)
+    host.create_fact(
+        File,
+        kwargs={'path': dest},
+        data={'user': user, 'group': group, 'mode': mode},
+    )
 
 
 @operation
@@ -862,6 +933,7 @@ def template(
     data.setdefault('host', host)
     data.setdefault('state', state)
     data.setdefault('inventory', state.inventory)
+    data.setdefault('facts', pyinfra.facts)
 
     # Render and make file-like it's output
     try:
@@ -907,6 +979,19 @@ def _validate_path(path):
         raise OperationTypeError('`path` must be a string or `os.PathLike` object')
 
 
+def _raise_or_remove_invalid_path(fs_type, path, force, force_backup, force_backup_dir):
+    if force:
+        if force_backup:
+            backup_path = '{0}.{1}'.format(path, get_timestamp())
+            if force_backup_dir:
+                backup_path = '{0}/{1}'.format(force_backup_dir, backup_path)
+            yield 'mv {0} {1}'.format(path, backup_path)
+        else:
+            yield 'rm -rf {0}'.format(path)
+    else:
+        raise OperationError('{0} exists and is not a {1}'.format(path, fs_type))
+
+
 @operation(pipeline_facts={
     'link': 'path',
 })
@@ -915,6 +1000,7 @@ def link(
     target=None, present=True, assume_present=False,
     user=None, group=None, symbolic=True,
     create_remote_dir=True,
+    force=False, force_backup=True, force_backup_dir=None,
     state=None, host=None,
 ):
     '''
@@ -928,6 +1014,9 @@ def link(
     + group: group to own the link
     + symbolic: whether to make a symbolic link (vs hard link)
     + create_remote_dir: create the remote directory if it doesn't exist
+    + force: if the target exists and is not a file, move or remove it and continue
+    + force_backup: set to ``False`` to remove any existing non-file when ``force=True``
+    + force_backup_dir: directory to move any backup to when ``force=True``
 
     ``create_remote_dir``:
         If the remote directory does not exist it will be created using the same
@@ -975,7 +1064,10 @@ def link(
 
     # Not a link?
     if info is False:
-        raise OperationError('{0} exists and is not a link'.format(path))
+        yield _raise_or_remove_invalid_path(
+            'link', path, force, force_backup, force_backup_dir,
+        )
+        info = None
 
     add_args = ['ln']
     if symbolic:
@@ -1058,6 +1150,7 @@ def file(
     present=True, assume_present=False,
     user=None, group=None, mode=None, touch=False,
     create_remote_dir=True,
+    force=False, force_backup=True, force_backup_dir=None,
     state=None, host=None,
 ):
     '''
@@ -1071,6 +1164,9 @@ def file(
     + mode: permissions of the files as an integer, eg: 755
     + touch: whether to touch the file
     + create_remote_dir: create the remote directory if it doesn't exist
+    + force: if the target exists and is not a file, move or remove it and continue
+    + force_backup: set to ``False`` to remove any existing non-file when ``force=True``
+    + force_backup_dir: directory to move any backup to when ``force=True``
 
     ``create_remote_dir``:
         If the remote directory does not exist it will be created using the same
@@ -1100,7 +1196,10 @@ def file(
 
     # Not a file?!
     if info is False:
-        raise OperationError('{0} exists and is not a file'.format(path))
+        yield _raise_or_remove_invalid_path(
+            'file', path, force, force_backup, force_backup_dir,
+        )
+        info = None
 
     # Doesn't exist & we want it
     if not assume_present and info is None and present:
@@ -1167,6 +1266,7 @@ def directory(
     path,
     present=True, assume_present=False,
     user=None, group=None, mode=None, recursive=False,
+    force=False, force_backup=True, force_backup_dir=None,
     _no_check_owner_mode=False,
     _no_fail_on_link=False,
     state=None, host=None,
@@ -1181,6 +1281,9 @@ def directory(
     + group: group to own the folder
     + mode: permissions of the folder
     + recursive: recursively apply user/group/mode
+    + force: if the target exists and is not a file, move or remove it and continue
+    + force_backup: set to ``False`` to remove any existing non-file when ``force=True``
+    + force_backup_dir: directory to move any backup to when ``force=True``
 
     Examples:
 
@@ -1218,7 +1321,10 @@ def directory(
         if _no_fail_on_link and host.get_fact(Link, path=path):
             host.noop('directory {0} already exists (as a link)'.format(path))
             return
-        raise OperationError('{0} exists and is not a directory'.format(path))
+        yield _raise_or_remove_invalid_path(
+            'directory', path, force, force_backup, force_backup_dir,
+        )
+        info = None
 
     # Doesn't exist & we want it
     if not assume_present and info is None and present:

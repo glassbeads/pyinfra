@@ -12,5 +12,6 @@
     "second_output_commands": [
         "brew upgrade php"
     ],
-    "idempotent": false
+    "idempotent": false,
+    "disable_idempotent_warning_reason": "package upgrades are always executed"
 }

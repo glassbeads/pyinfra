@@ -16,5 +16,5 @@
         }
     },
     "commands": [],
-    "idempotent": false
+    "noop_description": "file /home/myfile has already been downloaded"
 }

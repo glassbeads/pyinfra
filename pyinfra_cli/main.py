@@ -12,10 +12,11 @@ import click
 from pyinfra import (
     __version__,
     logger,
+    pseudo_config,
     pseudo_inventory,
     pseudo_state,
 )
-from pyinfra.api import State
+from pyinfra.api import Config, State
 from pyinfra.api.connect import connect_all, disconnect_all
 from pyinfra.api.exceptions import NoGroupError, PyinfraError
 from pyinfra.api.facts import (
@@ -29,7 +30,7 @@ from pyinfra.api.operations import run_ops
 from pyinfra.api.util import get_kwargs_str
 from pyinfra.operations import server
 
-from .config import load_config, load_deploy_config
+from .config import extract_file_config
 from .exceptions import (
     CliError,
     UnexpectedExternalError,
@@ -49,10 +50,12 @@ from .prints import (
     print_support_info,
 )
 from .util import (
+    exec_file,
     get_facts_and_args,
     get_operation_and_args,
     list_dirs_above_file,
     load_deploy_file,
+    parse_cli_arg,
 )
 from .virtualenv import init_virtualenv
 
@@ -118,6 +121,17 @@ def _print_support(ctx, param, value):
     multiple=True,
 )
 @click.option('--fail-percent', type=int, help='% of hosts allowed to fail.')
+@click.option(
+    '--data',
+    multiple=True,
+    help='Override data values, format key=value.',
+)
+@click.option(
+    '--config',
+    'config_filename',
+    help='Specify config file to use (default: config.py).',
+    default='config.py',
+)
 # Auth args
 @click.option(
     '--sudo', is_flag=True, default=False,
@@ -268,7 +282,7 @@ def _main(
     winrm_username, winrm_password, winrm_port,
     winrm_transport, shell_executable,
     sudo, sudo_user, use_sudo_password, su_user,
-    parallel, fail_percent,
+    parallel, fail_percent, data, config_filename,
     dry, limit, no_wait, serial, quiet,
     debug, debug_data, debug_facts, debug_operations,
     facts=None, print_operations=None, support=None,
@@ -289,6 +303,9 @@ def _main(
     init_virtualenv()
 
     cwd = getcwd()
+    # Unconditionally adding cwd into sys.path
+    sys.path.append(cwd)
+
     deploy_dir = cwd
     potential_deploy_dirs = []
 
@@ -313,7 +330,7 @@ def _main(
 
         if any((
             path.isdir(path.join(potential_deploy_dir, 'group_data')),
-            path.isfile(path.join(potential_deploy_dir, 'config.py')),
+            path.isfile(path.join(potential_deploy_dir, config_filename)),
         )):
             logger.debug('Setting directory to: {0}'.format(potential_deploy_dir))
             deploy_dir = potential_deploy_dir
@@ -322,7 +339,8 @@ def _main(
         logger.debug('Deploy directory remains as cwd')
 
     # Make sure imported files (deploy.py/etc) behave as if imported from the cwd
-    sys.path.append(deploy_dir)
+    if deploy_dir not in sys.path:
+        sys.path.append(deploy_dir)
 
     # Create an empty/unitialised state object
     state = State()
@@ -344,8 +362,16 @@ def _main(
     if not quiet:
         click.echo('--> Loading config...', err=True)
 
+    config = Config()
+    pseudo_config.set(config)
+
     # Load up any config.py from the filesystem
-    config = load_config(deploy_dir)
+    config_filename = path.join(deploy_dir, config_filename)
+    if path.exists(config_filename):
+        extract_file_config(config_filename, config)  # TODO: remove this
+        exec_file(config_filename)
+
+    # TODO: lock the config here, moving up from below when possible (v2)
 
     # Make a copy before we overwrite
     original_operations = operations
@@ -407,9 +433,14 @@ def _main(
     pyinfra INVENTORY exec -- echo "hello world"
     pyinfra INVENTORY fact os [users]...'''.format(operations))
 
-    # Load any hooks/config from the deploy file
+    # TODO: remove this - legacy load of any config variables from the top of
+    # the first deploy file.
     if command == 'deploy':
-        load_deploy_config(operations[0], config)
+        extract_file_config(operations[0], config)
+
+    # Lock the current config, this allows us to restore this version after
+    # executing deploy files that may alter them.
+    config.lock_current_sate()
 
     # Arg based config overrides
     if sudo:
@@ -435,19 +466,36 @@ def _main(
     if not quiet:
         click.echo('--> Loading inventory...', err=True)
 
+    override_data = {}
+
+    for arg in data:
+        key, value = arg.split('=', 1)
+        override_data[key] = value
+
+    override_data = {
+        key: parse_cli_arg(value)
+        for key, value in override_data.items()
+    }
+
+    for key, value in (
+        ('ssh_user', ssh_user),
+        ('ssh_key', ssh_key),
+        ('ssh_key_password', ssh_key_password),
+        ('ssh_port', ssh_port),
+        ('ssh_password', ssh_password),
+        ('winrm_username', winrm_username),
+        ('winrm_password', winrm_password),
+        ('winrm_port', winrm_port),
+        ('winrm_transport', winrm_transport),
+    ):
+        if value:
+            override_data[key] = value
+
     # Load up the inventory from the filesystem
     inventory, inventory_group = make_inventory(
         inventory,
         deploy_dir=deploy_dir,
-        ssh_port=ssh_port,
-        ssh_user=ssh_user,
-        ssh_key=ssh_key,
-        ssh_key_password=ssh_key_password,
-        ssh_password=ssh_password,
-        winrm_username=winrm_username,
-        winrm_password=winrm_password,
-        winrm_port=winrm_port,
-        winrm_transport=winrm_transport,
+        override_data=override_data,
     )
 
     # Attach to pseudo inventory
@@ -560,6 +608,8 @@ def _main(
         for i, filename in enumerate(operations):
             logger.info('Loading: {0}'.format(click.style(filename, bold=True)))
             load_deploy_file(state, filename)
+            # Remove any config changes introduced by the deploy file & any includes
+            config.reset_locked_state()
 
     # Operation w/optional args
     elif command == 'op':

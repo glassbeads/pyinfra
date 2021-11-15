@@ -9,6 +9,7 @@ from mock import patch
 from pyinfra.api import Config, State
 from pyinfra.api.connectors.util import (
     make_unix_command,
+    make_unix_command_for_host,
     split_combined_output,
 )
 
@@ -35,6 +36,14 @@ class TestMakeUnixCommandConnectorUtil(TestCase):
     def test_command(self):
         command = make_unix_command('echo Šablony')
         assert command.get_raw_value() == "sh -c 'echo Šablony'"
+
+    def test_doas_command(self):
+        command = make_unix_command('uptime', doas=True)
+        assert command.get_raw_value() == 'doas -n sh -c uptime'
+
+    def test_doas_user_command(self):
+        command = make_unix_command('uptime', doas=True, doas_user='pyinfra')
+        assert command.get_raw_value() == 'doas -n -u pyinfra sh -c uptime'
 
     def test_sudo_command(self):
         command = make_unix_command('uptime', sudo=True)
@@ -118,16 +127,31 @@ class TestMakeUnixCommandConnectorUtil(TestCase):
         resulting in an empty command output.
         '''
         state = State(make_inventory(), Config(SU_USER=True))
-        command = make_unix_command('echo Šablony', state=state)
+        host = state.inventory.get_host('somehost')
+        command = make_unix_command_for_host(state, host, 'echo Šablony')
         assert command.get_raw_value() == "sh -c 'echo Šablony'"
 
 
 class TestMakeUnixCommandConnectorUtilWarnings(TestCase):
-    def test_sudo_warnings(self):
-        state = State(make_inventory(), Config(SU_USER=True))
+    def test_doas_warnings(self):
+        state = State(make_inventory(), Config(SU_USER=True, SUDO=True))
+        host = state.inventory.get_host('somehost')
 
         with patch('pyinfra.api.connectors.util._warn_invalid_auth_args') as fake_auth_args:
-            command = make_unix_command('echo Šablony', state=state)
+            command = make_unix_command_for_host(state, host, 'echo Šablony')
+
+        assert command.get_raw_value() == "sh -c 'echo Šablony'"
+        fake_auth_args.assert_called_once()
+        _, args, kwargs = fake_auth_args.mock_calls[0]
+        assert args[1] == 'doas'
+        assert args[2] == ('doas_user',)
+
+    def test_sudo_warnings(self):
+        state = State(make_inventory(), Config(SU_USER=True, DOAS=True))
+        host = state.inventory.get_host('somehost')
+
+        with patch('pyinfra.api.connectors.util._warn_invalid_auth_args') as fake_auth_args:
+            command = make_unix_command_for_host(state, host, 'echo Šablony')
 
         assert command.get_raw_value() == "sh -c 'echo Šablony'"
         fake_auth_args.assert_called_once()
@@ -136,10 +160,11 @@ class TestMakeUnixCommandConnectorUtilWarnings(TestCase):
         assert args[2] == ('use_sudo_password', 'use_sudo_login', 'preserve_sudo_env', 'sudo_user')
 
     def test_su_warnings(self):
-        state = State(make_inventory(), Config(SUDO=True))
+        state = State(make_inventory(), Config(DOAS=True, SUDO=True))
+        host = state.inventory.get_host('somehost')
 
         with patch('pyinfra.api.connectors.util._warn_invalid_auth_args') as fake_auth_args:
-            command = make_unix_command('echo Šablony', state=state)
+            command = make_unix_command_for_host(state, host, 'echo Šablony')
 
         assert command.get_raw_value() == "sh -c 'echo Šablony'"
         fake_auth_args.assert_called_once()

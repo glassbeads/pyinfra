@@ -1,8 +1,10 @@
 {
     "args": ["someuser"],
     "facts": {
-        "mysql_users": {
-            "someuser@localhost": {}
+        "mysql.MysqlUsers": {
+            "mysql_host=None, mysql_password=None, mysql_port=None, mysql_user=None": {
+                "someuser@localhost": {}
+            }
         }
     },
     "commands": [],

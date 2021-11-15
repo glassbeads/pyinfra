@@ -5,7 +5,9 @@
         "password": "abc"
     },
     "facts": {
-        "postgresql_roles": {}
+        "postgresql.PostgresqlRoles": {
+            "postgresql_host=None, postgresql_password=None, postgresql_port=None, postgresql_user=None": {}
+        }
     },
     "commands": [
         [

@@ -1,7 +1,9 @@
 {
     "args": ["somedb"],
     "facts" :{
-        "postgresql_databases": {}
+        "postgresql.PostgresqlDatabases": {
+            "postgresql_host=None, postgresql_password=None, postgresql_port=None, postgresql_user=None": {}
+        }
     },
     "commands": [
         "psql -Ac 'CREATE DATABASE \"somedb\"'"

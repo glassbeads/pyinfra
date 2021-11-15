@@ -16,5 +16,6 @@
         "pacman -Sy",
         "pacman --noconfirm -Su"
     ],
-    "idempotent": false
+    "idempotent": false,
+    "disable_idempotent_warning_reason": "package upgrades are always executed"
 }

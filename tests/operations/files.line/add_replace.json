@@ -6,12 +6,11 @@
     },
     "facts": {
         "files.FindInFile": {
-            "path=somefile, pattern=^.*match_line.*$, interpolate_variables=False": [],
-            "path=somefile, pattern=^.*replace_line.*$, interpolate_variables=False": []
+            "interpolate_variables=False, path=somefile, pattern=^.*match_line.*$": [],
+            "interpolate_variables=False, path=somefile, pattern=^.*replace_line.*$": []
         }
     },
     "commands": [
         "echo replace_line >> somefile"
-    ],
-    "idempotent": false
+    ]
 }

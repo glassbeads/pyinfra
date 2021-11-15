@@ -6,6 +6,7 @@
 FakePathLike
 Launchd
 Openvz
+acl
 addrs
 addsitedir
 adhoc
@@ -82,6 +83,7 @@ distros
 dnf
 dns
 dnsmasq
+doas
 docbits
 docopt
 dport
@@ -117,6 +119,7 @@ getargspec
 getcallargs
 getfo
 getframeinfo
+getfullargspec
 getitem
 getpeername
 getrlimit
@@ -217,6 +220,7 @@ paramiko
 pardir
 pathlib
 pathname
+perf
 pip3
 pipelining
 pkey
@@ -241,6 +245,7 @@ py
 pyc
 pygments
 pyinfra
+pyinfrawinrmsession
 pywinrm
 quickfixengineering
 rcd
@@ -258,6 +263,7 @@ rol
 rsa
 rst
 rsync
+runlevel
 runlevels
 s01
 s1
@@ -290,6 +296,7 @@ status
 stdlib
 stringify
 su
+subclassed
 subclassing
 subkey
 submodules
@@ -341,11 +348,13 @@ vm
 vmlinuz
 vv
 vz
+vzctl
 w605
 warnoptions
 wget
 whocares
 win32
+windowslink
 winrm
 worktree
 writeable

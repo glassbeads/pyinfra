@@ -119,6 +119,7 @@ class TestSSHConnector(TestCase):
                 pkey=fake_key,
                 timeout=10,
                 username='vagrant',
+                _pyinfra_force_forward_agent=None,
             )
 
         # Check that loading the same key again is cached in the state
@@ -289,6 +290,7 @@ class TestSSHConnector(TestCase):
                 pkey=fake_key,
                 timeout=10,
                 username='vagrant',
+                _pyinfra_force_forward_agent=None,
             )
 
         # Check that loading the same key again is cached in the state
@@ -339,6 +341,7 @@ class TestSSHConnector(TestCase):
                 pkey=fake_dss_key,
                 timeout=10,
                 username='vagrant',
+                _pyinfra_force_forward_agent=None,
             )
 
         # Check that loading the same key again is cached in the state
@@ -430,9 +433,8 @@ class TestSSHConnector(TestCase):
     @patch('pyinfra.api.connectors.ssh.SSHClient')
     def test_run_shell_command_success_exit_code(self, fake_ssh_client):
         fake_ssh = MagicMock()
-        fake_stdin = MagicMock()
         fake_stdout = MagicMock()
-        fake_ssh.exec_command.return_value = fake_stdin, fake_stdout, MagicMock()
+        fake_ssh.exec_command.return_value = MagicMock(), fake_stdout, MagicMock()
 
         fake_ssh_client.return_value = fake_ssh
 
@@ -451,9 +453,8 @@ class TestSSHConnector(TestCase):
     @patch('pyinfra.api.connectors.ssh.SSHClient')
     def test_run_shell_command_error(self, fake_ssh_client):
         fake_ssh = MagicMock()
-        fake_stdin = MagicMock()
         fake_stdout = MagicMock()
-        fake_ssh.exec_command.return_value = fake_stdin, fake_stdout, MagicMock()
+        fake_ssh.exec_command.return_value = MagicMock(), fake_stdout, MagicMock()
 
         fake_ssh_client.return_value = fake_ssh
 
@@ -481,9 +482,8 @@ class TestSSHConnector(TestCase):
         fake_getpass,
     ):
         fake_ssh = MagicMock()
-        fake_stdin = MagicMock()
         fake_stdout = MagicMock()
-        fake_ssh.exec_command.return_value = fake_stdin, fake_stdout, MagicMock()
+        fake_ssh.exec_command.return_value = MagicMock(), fake_stdout, MagicMock()
 
         fake_ssh_client.return_value = fake_ssh
         fake_getpass.return_value = 'password'
@@ -496,7 +496,7 @@ class TestSSHConnector(TestCase):
         command = 'echo Šablony'
         fake_stdout.channel.recv_exit_status.return_value = 0
 
-        out = host.run_shell_command(command, use_sudo_password=True, print_output=True)
+        out = host.run_shell_command(command, sudo=True, use_sudo_password=True, print_output=True)
         assert len(out) == 3
 
         status, stdout, stderr = out
@@ -508,11 +508,100 @@ class TestSSHConnector(TestCase):
 
         fake_ssh.exec_command.assert_called_with((
             'env SUDO_ASKPASS=pyinfra-sudo-askpass PYINFRA_SUDO_PASSWORD=password '
-            "sh -c 'echo Šablony'"
+            "sudo -H -A -k sh -c 'echo Šablony'"
+        ), get_pty=False)
+
+    @patch('pyinfra.api.connectors.util.getpass')
+    @patch('pyinfra.api.connectors.util.get_sudo_askpass_exe')
+    @patch('pyinfra.api.connectors.ssh.SSHClient')
+    @patch('pyinfra.api.connectors.ssh.SFTPClient')
+    def test_run_shell_command_sudo_password_automatic_prompt(
+        self,
+        fake_sftp_client,
+        fake_ssh_client,
+        fake_get_sudo_askpass_exe,
+        fake_getpass,
+    ):
+        fake_ssh = MagicMock()
+        first_fake_stdout = MagicMock()
+        second_fake_stdout = MagicMock()
+
+        first_fake_stdout.__iter__.return_value = ['sudo: a password is required']
+
+        fake_ssh.exec_command.side_effect = [
+            (MagicMock(), first_fake_stdout, MagicMock()),  # command w/o sudo password
+            (MagicMock(), MagicMock(), MagicMock()),  # command to chmod askpass file
+            (MagicMock(), second_fake_stdout, MagicMock()),  # command with sudo pw
+        ]
+
+        fake_ssh_client.return_value = fake_ssh
+        fake_getpass.return_value = 'password'
+
+        inventory = make_inventory(hosts=('somehost',))
+        State(inventory, Config())
+        host = inventory.get_host('somehost')
+        host.connect()
+
+        command = 'echo Šablony'
+        first_fake_stdout.channel.recv_exit_status.return_value = 1
+        second_fake_stdout.channel.recv_exit_status.return_value = 0
+
+        out = host.run_shell_command(command, sudo=True, print_output=True)
+        assert len(out) == 3
+
+        status, stdout, stderr = out
+        assert status is True
+
+        fake_sftp_client.from_transport().putfo.assert_called_with(
+            fake_get_sudo_askpass_exe.return_value, 'pyinfra-sudo-askpass',
+        )
+
+        fake_ssh.exec_command.assert_any_call((
+            "sudo -H -n sh -c 'echo Šablony'"
+        ), get_pty=False)
+
+        fake_ssh.exec_command.assert_called_with((
+            'env SUDO_ASKPASS=pyinfra-sudo-askpass PYINFRA_SUDO_PASSWORD=password '
+            "sudo -H -A -k sh -c 'echo Šablony'"
         ), get_pty=False)
 
     # SSH file put/get tests
     #
+
+    @patch('pyinfra.api.connectors.ssh.SSHClient')
+    @patch('pyinfra.api.connectors.util._get_sudo_password')
+    def test_run_shell_command_retry_for_sudo_password(
+        self,
+        fake_get_sudo_password,
+        fake_ssh_client,
+    ):
+        fake_get_sudo_password.return_value = 'PASSWORD'
+
+        fake_ssh = MagicMock()
+        fake_stdin = MagicMock()
+        fake_stdout = MagicMock()
+        fake_stderr = ['sudo: a password is required']
+        fake_ssh.exec_command.return_value = fake_stdin, fake_stdout, fake_stderr
+
+        fake_ssh_client.return_value = fake_ssh
+
+        inventory = make_inventory(hosts=('somehost',))
+        state = State(inventory, Config())
+        host = inventory.get_host('somehost')
+        host.connect(state)
+
+        command = 'echo hi'
+        return_values = [1, 0]  # return 0 on the second call
+        fake_stdout.channel.recv_exit_status.side_effect = lambda: return_values.pop(0)
+
+        out = host.run_shell_command(command)
+        assert len(out) == 3
+        assert out[0] is True
+        assert fake_get_sudo_password.called
+        fake_ssh.exec_command.assert_called_with(
+            "env SUDO_ASKPASS=pyinfra-sudo-askpass PYINFRA_SUDO_PASSWORD=PASSWORD sh -c 'echo hi'",
+            get_pty=False,
+        )
 
     @patch('pyinfra.api.connectors.ssh.SSHClient')
     @patch('pyinfra.api.connectors.ssh.SFTPClient')
@@ -558,10 +647,8 @@ class TestSSHConnector(TestCase):
         assert status is True
 
         fake_ssh_client().exec_command.assert_called_with((
-            "sudo -H -n -u ubuntu sh -c 'mv "
-            '/tmp/pyinfra-de01e82cb691e8a31369da3c7c8f17341c44ac24 '
-            "\'\"\'\"\'not another file\'\"\'\"\' && chown ubuntu "
-            "\'\"\'\"\'not another file\'\"\'\"\'\'"
+            "sh -c 'rm -f "
+            "/tmp/pyinfra-de01e82cb691e8a31369da3c7c8f17341c44ac24'"
         ), get_pty=False)
 
         fake_sftp_client.from_transport().putfo.assert_called_with(
@@ -570,7 +657,7 @@ class TestSSHConnector(TestCase):
 
     @patch('pyinfra.api.connectors.ssh.SSHClient')
     @patch('pyinfra.api.connectors.ssh.SFTPClient')
-    def test_put_file_su_user_fail(self, fake_sftp_client, fake_ssh_client):
+    def test_put_file_su_user_fail_acl(self, fake_sftp_client, fake_ssh_client):
         inventory = make_inventory(hosts=('anotherhost',))
         State(inventory, Config())
         host = inventory.get_host('anotherhost')
@@ -591,9 +678,46 @@ class TestSSHConnector(TestCase):
         assert status is False
 
         fake_ssh_client().exec_command.assert_called_with((
-            "su centos -c 'sh -c '\"'\"'mv "
+            "sh -c 'setfacl -m u:centos:r "
+            "/tmp/pyinfra-43db9984686317089fefcf2e38de527e4cb44487'"
+        ), get_pty=False)
+
+        fake_sftp_client.from_transport().putfo.assert_called_with(
+            fake_open(), '/tmp/pyinfra-43db9984686317089fefcf2e38de527e4cb44487',
+        )
+
+    @patch('pyinfra.api.connectors.ssh.SSHClient')
+    @patch('pyinfra.api.connectors.ssh.SFTPClient')
+    def test_put_file_su_user_fail_copy(self, fake_sftp_client, fake_ssh_client):
+        inventory = make_inventory(hosts=('anotherhost',))
+        State(inventory, Config())
+        host = inventory.get_host('anotherhost')
+        host.connect()
+
+        stdout_mock = MagicMock()
+        exit_codes = [0, 1]
+        stdout_mock.channel.recv_exit_status.side_effect = lambda: exit_codes.pop(0)
+        fake_ssh_client().exec_command.return_value = MagicMock(), stdout_mock, MagicMock()
+
+        fake_open = mock_open(read_data='test!')
+        with patch('pyinfra.api.util.open', fake_open, create=True):
+            status = host.put_file(
+                'not-a-file', 'not-another-file',
+                print_output=True,
+                su_user='centos',
+            )
+
+        assert status is False
+
+        fake_ssh_client().exec_command.assert_any_call((
+            "sh -c 'setfacl -m u:centos:r "
+            "/tmp/pyinfra-43db9984686317089fefcf2e38de527e4cb44487'"
+        ), get_pty=False)
+
+        fake_ssh_client().exec_command.assert_called_with((
+            "su centos -c 'sh -c '\"'\"'cp "
             '/tmp/pyinfra-43db9984686317089fefcf2e38de527e4cb44487 '
-            "not-another-file && chown centos not-another-file'\"'\"''"
+            "not-another-file'\"'\"''"
         ), get_pty=False)
 
         fake_sftp_client.from_transport().putfo.assert_called_with(

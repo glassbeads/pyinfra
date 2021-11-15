@@ -13,5 +13,6 @@
     "commands": [
         "touch testfile"
     ],
-    "idempotent": false
+    "idempotent": false,
+    "disable_idempotent_warning_reason": "touch operations are always executed"
 }
